@@ -38,6 +38,7 @@
 
 #include <linux/clockchips.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jo Van Bulck <jo.vanbulck@cs.kuleuven.be>, Raoul Strackx <raoul.strackx@cs.kuleuven.be>");
@@ -425,7 +426,13 @@ static struct kretprobe krp = {
     .maxactive = 20 /* Probe up to 20 instances concurrently. */
 };
 
-int init_module(void)
+/*
+ * Use module_init/module_exit macros instead of defining init_module/cleanup_module
+ * directly. On kernels >= 6.x with CET/IBT enabled, indirect calls must target
+ * ENDBR64 instructions. The macros ensure the compiler emits IBT-compatible entry
+ * points; bare init_module definitions can lack ENDBR64 and cause a #CP fault.
+ */
+static int __init sgxstep_init(void)
 {
     /* Register virtual device */
     if (misc_register(&step_dev))
@@ -440,6 +447,7 @@ int init_module(void)
     if (register_kretprobe(&krp) < 0)
     {
         err("register_kprobe failed..");
+        misc_deregister(&step_dev);
         step_dev.this_device = NULL;
         return -EINVAL;
     }
@@ -448,7 +456,7 @@ int init_module(void)
     return 0;
 }
 
-void cleanup_module(void)
+static void __exit sgxstep_exit(void)
 {
     /* Unregister virtual device */
     if (step_dev.this_device)
@@ -457,3 +465,6 @@ void cleanup_module(void)
     unregister_kretprobe(&krp);
     log("kernel module unloaded");
 }
+
+module_init(sgxstep_init);
+module_exit(sgxstep_exit);
