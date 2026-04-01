@@ -27,6 +27,8 @@
 #include <linux/sched.h>
 #include <asm/irq.h>
 #include <asm/apic.h>
+#include <asm/msr-index.h>
+#include <linux/smp.h>
 
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
@@ -55,6 +57,36 @@ static void *g_isr_kernel_vbase = NULL;
 
 static int g_cr4_cet = 0;
 static int g_in_use = 0;
+
+/*
+ * Per-CPU saved IA32_S_CET values for IBT restore.
+ *
+ * exec_priv runs user-space code (__ss_irq_gate callback) in ring-0 via a
+ * custom IDT gate. The gate makes an indirect call (`call *__ss_irq_gate_cb`)
+ * from ring-0, which triggers kernel IBT (ENDBR_EN). On kernel 6.x with
+ * CONFIG_X86_KERNEL_IBT=y the ENDBR_EN bit is set in IA32_S_CET, causing a
+ * #CP fault when the indirect call fires — even if the target has endbr64 —
+ * because the code runs at a user-space virtual address in ring-0, which puts
+ * the IBT state machine in an unexpected state on some microarchitectures.
+ * Disabling ENDBR_EN while the device is open is the safest fix.
+ */
+static DEFINE_PER_CPU(uint64_t, g_s_cet_saved);
+
+static void disable_ibt_on_cpu(void *unused)
+{
+    uint64_t val;
+    rdmsrl(MSR_IA32_S_CET, val);
+    this_cpu_write(g_s_cet_saved, val);
+    if (val & CET_ENDBR_EN)
+        wrmsrl(MSR_IA32_S_CET, val & ~CET_ENDBR_EN);
+}
+
+static void restore_ibt_on_cpu(void *unused)
+{
+    uint64_t saved = this_cpu_read(g_s_cet_saved);
+    if (saved)
+        wrmsrl(MSR_IA32_S_CET, saved);
+}
 
 typedef struct {
     uint16_t size;
@@ -169,6 +201,11 @@ static int step_open(struct inode *inode, struct file *file)
     RET_ASSERT( !save_idt() );
     RET_ASSERT( !save_apic() );
 
+    /* Disable kernel IBT (ENDBR_EN) on all CPUs so exec_priv's ring-0
+     * indirect call to user-space callbacks does not trigger #CP. */
+    on_each_cpu(disable_ibt_on_cpu, NULL, 1);
+    log("disabled kernel IBT (IA32_S_CET.ENDBR_EN) on all CPUs");
+
     g_in_use = 1;
     return 0;
 }
@@ -242,6 +279,10 @@ static int step_release(struct inode *inode, struct file *file)
 {
     restore_idt();
     restore_apic();
+
+    /* Restore kernel IBT state on all CPUs. */
+    on_each_cpu(restore_ibt_on_cpu, NULL, 1);
+    log("restored kernel IBT (IA32_S_CET.ENDBR_EN) on all CPUs");
 
     g_in_use = 0;
     return 0;
