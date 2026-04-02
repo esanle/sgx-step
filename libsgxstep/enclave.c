@@ -345,4 +345,32 @@ void dump_gprsgx_region(gprsgx_region_t *gprsgx_region)
     printf("    GSBASE:   0x%" PRIx64 "\n", gprsgx_region->fields.gsbase);
 }
 
+/*
+ * Wrapper for sgx_destroy_enclave() that ensures /dev/sgx-step is closed
+ * (and the APIC timer restored to the kernel's original mode) BEFORE the SGX
+ * driver's mmu_notifier cleanup runs.
+ *
+ * Any app that called apic_timer_oneshot/deadline() has hijacked the victim
+ * CPU's per-CPU APIC LVT.  The kernel scheduler tick on that CPU stops.
+ * sgx_destroy_enclave() -> sgx_release() -> mmu_notifier_unregister() ->
+ * synchronize_srcu() then deadlocks: SRCU grace periods require the victim
+ * CPU to pass through a scheduling quiescent state, which never happens
+ * without the timer tick.
+ *
+ * The fix: close /dev/sgx-step first (tear_down_sgx_step), which triggers
+ * step_release() in the kernel module and calls restore_apic(), re-arming
+ * the original kernel timer before enclave destruction proceeds.
+ *
+ * Activated via -Wl,--wrap=sgx_destroy_enclave in Makefile.config so all
+ * apps are protected automatically.
+ */
+/* sgx_status_t = uint32_t, sgx_enclave_id_t = uint64_t (SGX SDK ABI) */
+uint32_t __real_sgx_destroy_enclave(uint64_t eid);
+
+uint32_t __wrap_sgx_destroy_enclave(uint64_t eid)
+{
+    tear_down_sgx_step();
+    return __real_sgx_destroy_enclave(eid);
+}
+
 #endif
