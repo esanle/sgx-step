@@ -12,7 +12,8 @@ AS                   = gcc
 LD                   = gcc
 
 CFLAGS              += -fPIC -fno-stack-protector -fno-builtin -fno-jump-tables \
-                       -fno-common -Wno-attributes -g -D_GNU_SOURCE -O0
+                       -fno-common -Wno-attributes -g -D_GNU_SOURCE -O0 \
+                       -fcf-protection=branch
 INCLUDE              = -I$(LIBSGXSTEP_DIR) 
 LDFLAGS             += -lsgx-step -pthread $(SUBDIRS:%=-L %)
 
