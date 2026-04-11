@@ -41,9 +41,10 @@ uint64_t nemesis_tsc_eresume = 0x0;
 int sgx_step_eresume_cnt = 0;
 int sgx_step_do_trap = 0;
 
-extern int fd_step, fd_self_mem;
+extern int fd_step;
 struct sgx_step_enclave_info victim = {0};
 int ioctl_init = 0;
+int fd_self_mem = -1;
 
 void register_aep_cb(aep_cb_t cb)
 {
@@ -205,11 +206,8 @@ void mark_enclave_exec_not_accessed(void)
          * additionally flush the PTEs from the cache to further delay the
          * page-table walk and increase the landing space for the timer interrupt.
          */
-        if (PRESENT(*enclave_exec_ptes[i]))
-        {
-            *enclave_exec_ptes[i] = MARK_NOT_ACCESSED(*enclave_exec_ptes[i]);
-            flush(enclave_exec_ptes[i]);
-        }
+        *enclave_exec_ptes[i] = MARK_NOT_ACCESSED(*enclave_exec_ptes[i]);
+        flush(enclave_exec_ptes[i]);
     }
 }
 
@@ -219,7 +217,7 @@ uint64_t is_enclave_exec_accessed(void)
 
     for (int i = 0; i < enclave_exec_ptes_len; i++)
     {
-        if (PRESENT(*enclave_exec_ptes[i]) && ACCESSED(*enclave_exec_ptes[i]))
+        if (ACCESSED(*enclave_exec_ptes[i]))
             return (uint64_t) ENCLAVE_EXEC_NB2ADDR(i);
     }
     return 0;
@@ -227,13 +225,11 @@ uint64_t is_enclave_exec_accessed(void)
 
 void dump_enclave_exec_pages(void)
 {
-    if (!enclave_exec_ptes)
-        alloc_enclave_exec_ptes();
+    ASSERT (enclave_exec_ptes);
 
     for (int i = 0; i < enclave_exec_ptes_len; i++)
     {
-        info("%09lx: P=%ld; A=%ld", ENCLAVE_EXEC_NB2ADDR(i) - get_enclave_base(),
-                PRESENT(*enclave_exec_ptes[i]), ACCESSED(*enclave_exec_ptes[i]));
+        info("%09lx: A=%ld", ENCLAVE_EXEC_NB2ADDR(i) - get_enclave_base(), ACCESSED(*enclave_exec_ptes[i]));
     }
 }
 /*
