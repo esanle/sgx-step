@@ -47,9 +47,9 @@
     #define APIC_CONFIG_MSR         0
 #endif
 
-#define VICTIM_CPU                  10
-#define NUM_CORES                   16
-#define SPY_CPU                     2
+#define VICTIM_CPU                  2
+#define NUM_CORES                   32
+#define SPY_CPU                     18
 
 /*
  * XXX Configure APIC timer interval for next interrupt.
