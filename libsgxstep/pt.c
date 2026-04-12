@@ -28,7 +28,8 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 
-int fd_step = -1, fd_mem = -1, fd_self_mem = -1;
+int fd_step = -1, fd_mem = -1;
+extern int fd_self_mem;
 
 void mem_open( void )
 {
@@ -104,8 +105,23 @@ void *remap_page_table_level( void *address, pt_level_t level )
 	return addr_remapped;
 }
 
+#define ALIGNMENT 4096  // Use page alignment (4 KB)
+int mark_uc(uint64_t addr){
+	  // Align the address to 4 KB page boundary
+    uint64_t aligned_addr = (uint64_t)addr & ~(ALIGNMENT - 1);
+    if ((uint64_t)addr != aligned_addr) {
+        libsgxstep_info("Aligning address %#llx to %#llx\n", (unsigned long long)addr, (unsigned long long)aligned_addr);
+    }
+
+	step_open();
+	ASSERT( ioctl( fd_step, SGX_STEP_IOCTL_MEMORY_UC, (unsigned long) aligned_addr ) >= 0);
+    libsgxstep_info("Memory at address %#lx set to uncacheable\n", (unsigned long)aligned_addr);
+    return 0;
+}
+
 address_mapping_t *get_mappings( void *address )
 {
+	libsgxstep_info("Getting mappings for address %p", address);
 	address_mapping_t *mapping;
 	ASSERT( (mapping = (address_mapping_t *) malloc(sizeof(address_mapping_t))) );
 	memset( mapping, 0x00, sizeof( address_mapping_t ) );
@@ -249,10 +265,11 @@ void print_pte_adrs( void *adrs)
 
 void print_pte( uint64_t *pte )
 {
+	printf("RAW PTE: %llx\n", *pte);
     printf("+-------------------------------------------------------------------------------------------+\n");
     printf("| XD | PK | IGN | RSVD | PHYS ADRS      | IGN | G | PAT | D | A | PCD | PWT | U/S | R/W | P | \n");
-    printf("| %d  | x  | x   | %d    | 0x%012" PRIx64 " | x   | x | x   | %d | %d | x   | x   | %d   | %d   | %d | \n",
-            (int) EXECUTE_DISABLE(*pte), (int) RSVD(*pte), PT_PHYS(*pte), (int) DIRTY(*pte), (int) ACCESSED(*pte), (int) USER(*pte), (int) WRITABLE(*pte), (int) PRESENT(*pte));
+    printf("| %d  | x  | x   | %d    | 0x%012" PRIx64 " | x   | x | x   | %d | %d | %d   | x   | %d   | %d   | %d | \n",
+            (int) EXECUTE_DISABLE(*pte), (int) RSVD(*pte), PT_PHYS(*pte), (int) DIRTY(*pte), (int) ACCESSED(*pte), (int) CD(*pte), (int) USER(*pte), (int) WRITABLE(*pte), (int) PRESENT(*pte));
     printf("+-------------------------------------------------------------------------------------------+\n");
 }
 

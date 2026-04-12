@@ -58,8 +58,6 @@ sgx_step_aep_trampoline:
     /* optional C function callback */
     lea sgx_step_aep_cb(%rip), %xax
     mov (%xax), %xax
-    test %xax, %xax
-    je .Leresume
     call *%xax
 
 .Leresume:
@@ -71,22 +69,10 @@ sgx_step_aep_trampoline:
 
     lea sgx_step_aep_trampoline(%rip), %xcx   /* AEP address */
 
-    prefetch nemesis_tsc_eresume(%rip)
-    mfence
 
-    rdtsc
-    mov %eax, nemesis_tsc_eresume(%rip)
 
     mov $3, %xax                        /* ERESUME leaf */
-
-    /* optionally set RFLAGS.TF to enable simulated single-stepping for DEBUG enclaves */
-    lea sgx_step_do_trap(%rip), %rdx
-    mov (%rdx), %rdx
-    test %rdx, %rdx
-    je sgx_step_aep_eresume
-    pushf
-    orl $0x100, (%rsp)
-    popf
+    jmp sgx_step_aep_eresume
 
 .global sgx_step_aep_eresume
 sgx_step_aep_eresume:

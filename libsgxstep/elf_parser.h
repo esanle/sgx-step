@@ -11,6 +11,7 @@ struct symbol {
 };
 
 uintptr_t get_symbol_offset(const char *name);
+static void add_symbol(const char *name, uintptr_t address);
 void register_symbols(const char *filename);
 
 #endif

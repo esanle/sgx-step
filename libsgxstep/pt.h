@@ -47,6 +47,13 @@
 
 #define MASK_M			((uint64_t) ((INT64_C(0x1) << physical_address_width()) - 1))
 
+
+#define CD_SHIFT		4
+#define CD_MASK			(UINT64_C(0x1) << CD_SHIFT)
+
+#define PAT_SHIFT       7
+#define PAT_MASK        (UINT64_C(0x1) << PAT_SHIFT)
+
 #define A_SHIFT			5
 #define A_MASK			(UINT64_C(0x1) << A_SHIFT)
 
@@ -108,6 +115,10 @@
 #define MARK_ACCESSED(entry) 		((entry) | A_MASK)
 #define MARK_NOT_ACCESSED(entry) 	((entry) & ~A_MASK)
 
+#define CD(entry) 		(((entry) & CD_MASK) >> CD_SHIFT)
+#define MARK_CD(entry) 		((entry) | CD_MASK)
+#define MARK_NO_PAT(entry) 	((entry) & ~PAT_MASK)
+
 #define DIRTY(entry) 			(((entry) & D_MASK) >> D_SHIFT)
 #define MARK_DIRTY(entry) 		((entry) | D_MASK)
 #define MARK_CLEAN(entry) 		((entry) & ~D_MASK)
@@ -154,6 +165,7 @@
 #define PAGE1GiB_INDEX(virt)	(virt & PAGE1GiB_MASK) >> PAGE1GiB_SHIFT
 #define PAGE2MiB_INDEX(virt)	(virt & PAGE2MiB_MASK) >> PAGE2MiB_SHIFT
 
+int mark_uc(uint64_t addr);
 void mem_open( void );
 void step_open( void );
 void __attribute__((destructor))  tear_down_sgx_step( void );

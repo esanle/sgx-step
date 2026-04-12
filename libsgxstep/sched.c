@@ -128,7 +128,7 @@ int pstate_set_min_perf_pct( unsigned int val)
 
 int disable_turbo(void)
 {
-#ifdef HAS_TURBO
+#if HAS_TURBO
     return file_write_int( "/sys/devices/system/cpu/intel_pstate/no_turbo", 1);
 #else
     return -1;
@@ -137,7 +137,7 @@ int disable_turbo(void)
 
 int turbo_enabled( void )
 {
-#ifdef HAS_TURBO
+#if HAS_TURBO
 	int result;
 
   file_read_int( "/sys/devices/system/cpu/intel_pstate/no_turbo", &result);

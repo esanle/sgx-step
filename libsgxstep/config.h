@@ -20,7 +20,8 @@
 
 #ifndef SGX_STEP_CONFIG
 #define SGX_STEP_CONFIG
-
+#define HAS_PSTATE                  0
+#define HAS_TURBO                   0
 // TODO add coarser-grained logging levels
 #define LIBSGXSTEP_DEBUG            0
 
@@ -46,9 +47,9 @@
     #define APIC_CONFIG_MSR         0
 #endif
 
-#define VICTIM_CPU                  1
-#define NUM_CORES                   4
-#define SPY_CPU                     (NUM_CORES-1)
+#define VICTIM_CPU                  2
+#define NUM_CORES                   32
+#define SPY_CPU                     18
 
 /*
  * XXX Configure APIC timer interval for next interrupt.
@@ -58,6 +59,6 @@
  *       suitable timer intervals on our evaluation platforms by
  *       tweaking and observing the NOP microbenchmark erip results.
  */
-#define SGX_STEP_TIMER_INTERVAL 32
+#define SGX_STEP_TIMER_INTERVAL 22
 
 #endif

@@ -31,7 +31,10 @@ int g_apic_setup = 0;
 uint64_t g_apic_deadline_tsc_begin = -1;
 
 #if !X2APIC
+extern void *apic_base;
+void *dummy_pt = NULL;
     extern void *apic_base;
+
     
     /*
      * Code below maps APIC timer MMIO registers in user space.
@@ -101,23 +104,28 @@ int apic_timer_oneshot(uint8_t vector)
     /* NOTE: APIC will be auto-restored when closing /dev/sgx-step */
     apic_write(APIC_LVTT, vector | APIC_LVTT_ONESHOT);
     apic_write(APIC_TDCR, APIC_TDR_DIV_2);
-
-    // NOTE: APIC seems not to handle divide by 1 properly (?)
-    // see also: http://wiki.osdev.org/APIC_timer)
-    libsgxstep_info("APIC timer one-shot mode with division 2 (lvtt=%x/tdcr=%x)",
-        apic_read(APIC_LVTT), apic_read(APIC_TDCR));
 }
 
 int apic_timer_deadline(uint8_t vector)
 {
-    /* NOTE: APIC will be auto-restored when closing /dev/sgx-step */
+    /* Set the APIC timer to deadline mode with the provided vector */
     apic_write(APIC_LVTT, vector | APIC_LVTT_DEADLINE);
 
-    /* In xAPIC mode the memory-mapped write to LVTT needs to be serialized. */
+    /* Serialize memory-mapped writes to ensure proper behavior */
     asm volatile("mfence" : : : "memory");
 
-    libsgxstep_info("APIC timer tsc-deadline mode (lvtt=%x/tdcr=%x)",
+    /* Set a default TSC deadline of 100 cycles */
+    uint64_t current_tsc = rdtsc_begin();
+    uint64_t default_deadline = current_tsc + 100000;
+    wrmsr(IA32_TSC_DEADLINE_MSR, default_deadline);
+
+    /* Log the configuration */
+    libsgxstep_info("APIC timer configured in tsc-deadline mode (lvtt=%x, tdcr=%x)", 
         apic_read(APIC_LVTT), apic_read(APIC_TDCR));
+    libsgxstep_info("Default TSC deadline set to %llu (current=%llu, offset=100)", 
+        default_deadline, current_tsc);
+
+    return 0; // Indicate successful configuration
 }
 
 void apic_timer_deadline_irq(int tsc_offset)

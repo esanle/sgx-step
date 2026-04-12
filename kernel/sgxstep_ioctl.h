@@ -27,7 +27,8 @@
 #define SGX_STEP_IOCTL_GET_PT_MAPPING   _IOWR(SGX_STEP_IOCTL_MAGIC, 0, address_mapping_t)
 #define SGX_STEP_IOCTL_INVPG            _IOWR(SGX_STEP_IOCTL_MAGIC, 1, invpg_t)
 #define SGX_STEP_IOCTL_SETUP_ISR_MAP    _IOWR(SGX_STEP_IOCTL_MAGIC, 2, setup_isr_map_t)
-
+// Define the new IOCTL command
+#define SGX_STEP_IOCTL_MEMORY_UC 		_IOW('S', 5, uint64_t)
 typedef struct {
 	uint64_t virt;
 	uint64_t phys;

@@ -5,13 +5,6 @@ AS          = gcc
 AR          = ar
 ARFLAGS     = -rcs
 
-ifneq "$(WITH_PSTATE)" "0"
-CPPFLAGS     += -DHAS_PSTATE
-endif
-
-ifneq "$(WITH_TURBO)" "0"
-CPPFLAGS     += -DHAS_TURBO
-endif
 
 ifeq ($(M32), 1)
 	ASFLAGS = -m32 -DM32=1
