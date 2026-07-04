@@ -69,7 +69,13 @@ sgx_step_aep_trampoline:
 
     lea sgx_step_aep_trampoline(%rip), %xcx   /* AEP address */
 
-
+    /* Nemesis: record ERESUME timestamp just before re-entering enclave.
+     * Single-step latency = nemesis_tsc_aex(next) - nemesis_tsc_eresume(this)
+     * = execution time of the one instruction that ran. (clobbers rax/rdx,
+     * reloaded below before ENCLU sets rax=3.) */
+    rdtsc
+    mov %eax, nemesis_tsc_eresume(%rip)
+    mov %edx, nemesis_tsc_eresume+4(%rip)
 
     mov $3, %xax                        /* ERESUME leaf */
     jmp sgx_step_aep_eresume
