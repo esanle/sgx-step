@@ -152,8 +152,22 @@ void install_priv_gate(void *asm_handler, int vector)
     libsgxstep_info("locking user-space IRQ gate handler page at %p", __ss_irq_gate);
     ASSERT( !mlock(__ss_irq_gate, 0x1000) );
 
-    libsgxstep_info("installing ring-0 IRQ gate");
-    ASSERT( !claim_cpu(VICTIM_CPU) );
+    /*
+     * Multi-process: do NOT hard-pin to VICTIM_CPU here. The IDT is a single
+     * global structure shared by all CPUs, so the gate can be installed from
+     * whatever core the caller is already pinned to. Hard-pinning CPU 2 would
+     * drag every parallel attacker process onto the same core (apic_init runs
+     * lazily on the first APIC access, after the caller has claimed its own
+     * victim CPU), collapsing parallelism. Only fall back to VICTIM_CPU if the
+     * caller has not pinned itself to a single CPU yet (preserves the original
+     * single-process behaviour).
+     */
+    if (get_designated_cpu() < 0)
+    {
+        libsgxstep_info("no single-CPU affinity set; falling back to VICTIM_CPU %d", VICTIM_CPU);
+        ASSERT( !claim_cpu(VICTIM_CPU) );
+    }
+    libsgxstep_info("installing ring-0 IRQ gate on CPU %d", get_cpu());
     map_idt(&idt);
     /*
      * In principle, we could use a trap gate to make the exec_priv code

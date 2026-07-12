@@ -45,17 +45,70 @@
  MODULE_DESCRIPTION("SGX-Step: A Practical Attack Framework for Precise Enclave Execution Control");
  
  static int mtrr_id;
- 
- static struct page **g_isr_pages = NULL;
- static uint64_t g_isr_nr_pages = 0;
- static void *g_isr_kernel_vbase = NULL;
- 
+
  #if (LINUX_VERSION_CODE < KERNEL_VERSION(5,6,0))
      #define pin_user_pages_fast         get_user_pages_fast
      #define unpin_user_pages            put_user_pages
  #endif
- 
- static int g_in_use = 0;
+
+ /*
+  * PER-OPEN ISR mappings with deferred free (Design B). Each process that calls
+  * SETUP_ISR_MAP gets its OWN pinned+vmapped copy of the ISR section at a distinct
+  * kernel address. This is REQUIRED: the timer handler keeps per-step state in
+  * rip-relative globals (__ss_irq_fired handshake, __ss_irq_count, rax/rdx/rcx
+  * save slots). A single shared copy makes two concurrently single-stepping
+  * processes race on those globals (one core's IRQ sets the other's __ss_irq_fired
+  * → broken step handshake, corrupted saved regs). Per-process copies isolate them.
+  *
+  * The stateless X2APIC MSR gates (vec 50/51) also live in each copy; IDT[50/51] is
+  * a single global entry (last-writer-wins across processes), but since the gates
+  * are stateless and position-independent, whichever process's copy the IDT points
+  * at runs correctly for everyone. The ONLY hazard is freeing a copy while its
+  * kernel address is still live in some IDT gate. We avoid that by freeing ALL
+  * per-open copies together only on the LAST close (g_open_count==0), so no gate
+  * can point at an unmapped address while any process is still running.
+  *
+  * (Supersedes both the per-open-free design — which dangled IDT gates when one
+  * process exited early — and the single-shared-mapping design — which raced the
+  * timer-handler globals. This keeps per-process isolation AND defers all frees.)
+  */
+ /*
+  * Max concurrent single-stepping processes. Must match SGX_STEP_MAX_INSTANCES in
+  * libsgxstep/config.h (kernel module does not include that user header).
+  */
+ #ifndef SGX_STEP_MAX_INSTANCES
+ #define SGX_STEP_MAX_INSTANCES 4
+ #endif
+ struct isr_map {
+     struct page **pages;
+     uint64_t nr_pages;
+     void *kernel_vbase;
+ };
+ /*
+  * Slot-based ISR-map table. A slot is FREE iff kernel_vbase==NULL. Each attacker
+  * process (instance) gets its OWN pinned+vmapped copy so the timer handler's
+  * rip-relative globals are isolated between concurrently single-stepping cores.
+  *
+  * LIFETIME: all maps are freed together ONLY on the last close (g_open_count==0)
+  * -- never per-process. A process installs a GLOBAL IDT gate pointing at its map;
+  * freeing that map while any process is still open (its APIC timer may still be
+  * armed) would leave the gate dangling and a late IRQ would jump into unmapped
+  * kernel memory -> hard lockup. The batch-barrier orchestrator bounds how many
+  * maps coexist (<= batch size) and drains open_count to 0 between batches, so
+  * the table never accumulates past the batch and is torn down cleanly each time.
+  */
+ static struct isr_map g_isr_maps[SGX_STEP_MAX_INSTANCES];
+ static DEFINE_MUTEX(g_isr_map_lock);
+
+ /*
+  * Reference count of currently-open /dev/sgx-step handles. The IDT and APIC
+  * are global hardware/CPU state shared across all callers, so we save them on
+  * the FIRST open and restore them only on the LAST close. This prevents one
+  * exiting process from restoring the IDT while other processes are still
+  * single-stepping (which would crash them). Replaces the old binary g_in_use
+  * exclusive-open flag.
+  */
+ static atomic_t g_open_count = ATOMIC_INIT(0);
  
  typedef struct {
      uint16_t size;
@@ -129,24 +182,62 @@
  
  int step_open(struct inode *inode, struct file *file)
  {
-     if (g_in_use)
+     /*
+      * Save global IDT/APIC state only on the first open. Subsequent opens
+      * (other attacker processes) reuse the already-saved copy. Restore happens
+      * on the last close (see step_release). The shared ISR mapping is set up
+      * lazily on the first SETUP_ISR_MAP ioctl (see sgx_step_ioctl_setup_isr_map).
+      */
+     if (atomic_inc_return(&g_open_count) == 1)
      {
-         err("Device is already opened");
-         return -EBUSY;
+         if (save_idt() || save_apic())
+         {
+             atomic_dec(&g_open_count);
+             err("failed to save IDT/APIC on first open");
+             return -EIO;
+         }
      }
- 
-     RET_ASSERT( !save_idt() );
-     RET_ASSERT( !save_apic() );
- 
-     g_in_use = 1;
+
      return 0;
  }
  
  /* ********************** DEVICE CLOSE ******************************* */
  
+ /* Tear down one slot (caller holds g_isr_map_lock). */
+ static void free_isr_slot(struct isr_map *m)
+ {
+     if (m->kernel_vbase) {
+         vunmap(m->kernel_vbase);
+         m->kernel_vbase = NULL;
+     }
+     if (m->pages) {
+         unpin_user_pages(m->pages, m->nr_pages);
+         kfree(m->pages);
+         m->pages = NULL;
+     }
+     m->nr_pages = 0;
+ }
+
  /*
-  * Restore original IDT to ensure no user pointers are left. Free kernel vbase
-  * mappings and pinned user physical pages for any registered user ISRs.
+  * Free ALL ISR map slots and unpin their user pages. Called ONLY on the last
+  * close (g_open_count==0): once every process has gone, no IDT gate can still
+  * point at any of these kernel addresses, so tearing them all down together is
+  * safe. Freeing earlier (per-process) risks a dangling gate + armed timer while
+  * a peer still runs -> hard lockup (see the isr_map lifetime note above).
+  */
+ void free_isr_map(void)
+ {
+     int i;
+
+     mutex_lock(&g_isr_map_lock);
+     for (i = 0; i < SGX_STEP_MAX_INSTANCES; i++)
+         free_isr_slot(&g_isr_maps[i]);
+     mutex_unlock(&g_isr_map_lock);
+ }
+
+ /*
+  * Restore original IDT to ensure no user pointers are left. Called only on the
+  * LAST close (global hardware state shared across all processes).
   *
   * NOTE: the IDT virtual memory page is mapped write-protected by Linux, so we
   * have to disable CR0.WP temporarily here.
@@ -157,20 +248,9 @@
      memcpy((void*)g_idtr.base, g_idt_copy, g_idtr.size+1);
      enable_write_protection();
      log("restored IDT: %#llx with size %u", g_idtr.base, g_idtr.size+1);
- 
+
      kfree(g_idt_copy);
      g_idt_copy = NULL;
- 
-     if (g_isr_kernel_vbase) {
-         vunmap(g_isr_kernel_vbase);
-         g_isr_kernel_vbase = NULL;
-         
-         unpin_user_pages(g_isr_pages, g_isr_nr_pages);
-         g_isr_nr_pages = 0;
-         
-         kfree(g_isr_pages);
-         g_isr_pages = NULL;
-     }
  }
  
  void restore_apic(void)
@@ -205,10 +285,22 @@
   */
  int step_release(struct inode *inode, struct file *file)
  {
-     restore_idt();
-     restore_apic();
- 
-     g_in_use = 0;
+     /*
+      * Restore global IDT/APIC and free ALL ISR maps only when the LAST handle
+      * closes. Peers may still be single-stepping and need the modified IDT/APIC
+      * + their kernel-mapped ISR gates intact. Freeing a map before then, while
+      * its GLOBAL IDT gate is live and its APIC timer may still be armed, would
+      * let a late IRQ jump into unmapped kernel memory -> hard lockup. The batch-
+      * barrier orchestrator drains open_count to 0 between batches, so this runs
+      * per batch and the table never accumulates past one batch.
+      */
+     if (atomic_dec_return(&g_open_count) == 0)
+     {
+         restore_idt();
+         restore_apic();
+         free_isr_map();
+     }
+
      return 0;
  }
  
@@ -316,41 +408,69 @@
  
  long sgx_step_ioctl_setup_isr_map(struct file *filep, unsigned int cmd, unsigned long arg)
  {
-     uint64_t nr_pinned_pages;
+     uint64_t nr_pinned_pages, nr_pages;
      setup_isr_map_t *data = (setup_isr_map_t*) arg;
- 
+     struct page **pages = NULL;
+     void *kernel_vbase = NULL;
+     long ret = -EINVAL;
+     int slot;
+
+     mutex_lock(&g_isr_map_lock);
+
+     /*
+      * Design B: give THIS caller its OWN pinned+vmapped copy of the ISR region
+      * (per-process, so the timer handler's rip-relative globals — __ss_irq_fired
+      * handshake, count, reg save slots — are isolated between concurrently
+      * single-stepping processes). Each process's isr_section is identical in
+      * layout but lives at a distinct user vaddr; it computes its own kernel-map
+      * offset from the returned isr_kernel_base. Slot-finding avoids clobbering a
+      * concurrent peer's slot; all slots are freed together on the last close
+      * (free_isr_map) -- see the isr_map lifetime note near the struct definition.
+      */
+     for (slot = 0; slot < SGX_STEP_MAX_INSTANCES; slot++)
+         if (!g_isr_maps[slot].kernel_vbase)
+             break;
+     if (slot == SGX_STEP_MAX_INSTANCES) {
+         ret = -EBUSY;
+         err("ISR map table full (max %d concurrent instances)", SGX_STEP_MAX_INSTANCES);
+         goto out;
+     }
+
      /* allocate space to hold Linux `struct page` pointers */
-     g_isr_nr_pages = (data->isr_stop - data->isr_start + PAGE_SIZE - 1) / PAGE_SIZE;
-     g_isr_pages = kmalloc(g_isr_nr_pages * sizeof(struct page *), GFP_KERNEL);
-     GOTO_ASSERT(g_isr_pages, "cannot allocate memory", out);
- 
+     nr_pages = (data->isr_stop - data->isr_start + PAGE_SIZE - 1) / PAGE_SIZE;
+     pages = kmalloc(nr_pages * sizeof(struct page *), GFP_KERNEL);
+     GOTO_ASSERT(pages, "cannot allocate memory", out);
+
      /* pin user physical memory so it cannot be swapped out by the kernel */
      nr_pinned_pages = pin_user_pages_fast(data->isr_start & ~(PAGE_SIZE - 1),
-                         g_isr_nr_pages, FOLL_LONGTERM | FOLL_WRITE, g_isr_pages);
-     GOTO_ASSERT(nr_pinned_pages == g_isr_nr_pages, "cannot pin all ISR pages", cleanup_pages);
- 
+                         nr_pages, FOLL_LONGTERM | FOLL_WRITE, pages);
+     GOTO_ASSERT(nr_pinned_pages == nr_pages, "cannot pin all ISR pages", cleanup_pages);
+
      /* map pinned physical memory into the kernel virtual address range */
-     g_isr_kernel_vbase = vmap(g_isr_pages, g_isr_nr_pages,
+     kernel_vbase = vmap(pages, nr_pages,
                              VM_READ | VM_EXEC | VM_SHARED, PAGE_SHARED_EXEC);
-     GOTO_ASSERT(g_isr_kernel_vbase, "cannot vmap ISR pages", cleanup_pin);
- 
-     data->isr_kernel_base = (uint64_t) g_isr_kernel_vbase;
-     log("mapped %lld pinned user ISR memory pages to kernel virtual address %#llx",
-             g_isr_nr_pages, data->isr_kernel_base);
+     GOTO_ASSERT(kernel_vbase, "cannot vmap ISR pages", cleanup_pin);
+
+     /* commit this per-open mapping into the free slot */
+     g_isr_maps[slot].pages = pages;
+     g_isr_maps[slot].nr_pages = nr_pages;
+     g_isr_maps[slot].kernel_vbase = kernel_vbase;
+
+     data->isr_kernel_base = (uint64_t) kernel_vbase;
+     log("mapped %lld pinned user ISR pages to kernel vaddr %#llx (slot %d/%d)",
+             nr_pages, data->isr_kernel_base, slot, SGX_STEP_MAX_INSTANCES);
+     mutex_unlock(&g_isr_map_lock);
      return 0;
- 
+
  cleanup_pin:
-     unpin_user_pages(g_isr_pages, g_isr_nr_pages);
-   
-   
+     unpin_user_pages(pages, nr_pages);
+
  cleanup_pages:
-     kfree(g_isr_pages);
- 
+     kfree(pages);
+
  out:
-     g_isr_kernel_vbase = NULL;
-     g_isr_pages = NULL;
-     g_isr_nr_pages = 0;
-     return -EINVAL;
+     mutex_unlock(&g_isr_map_lock);
+     return ret;
  }
  
  typedef long (*ioctl_t)(struct file *filep, unsigned int cmd, unsigned long arg);

@@ -118,20 +118,15 @@ trigger_sw_irq:
      * \arg rsi         value (64-bit)
      *
      * \note            clobbers RDI, RSI, RAX, RCX, RDX (all caller-save)
+     *
+     * NOTE: the `wrmsr`/`rdmsr` trampolines below issue the `int` and stay in
+     * user space (.text) -- they are only ever executed from within the owning
+     * libsgxstep process's own CR3, so a process-private user address is fine.
      */
     .global wrmsr
 wrmsr:
     int $WRMSR_GATE_VECTOR
     retq
-
-    .global __wrmsr_gate
-__wrmsr_gate:
-    mov %edi, %ecx
-    mov %esi, %eax
-    shr $32, %rsi
-    mov %esi, %edx
-    wrmsr
-    iretq
 
     /*
      * uint64_t rdmsr(uint32_t reg);
@@ -145,6 +140,32 @@ __wrmsr_gate:
 rdmsr:
     int $RDMSR_GATE_VECTOR
     retq
+
+/* ********************************************************************** */
+/*
+ * The X2APIC MSR ring-0 gate HANDLERS must live in `isr_section` so that
+ * libsgxstep rebases them into the global kernel address range (see
+ * install_irq_handler / is_in_isr_section). This is REQUIRED for multi-process
+ * single-stepping: the timer IRQ re-arm on every step issues `int
+ * $WRMSR_GATE_VECTOR`, but IDT[50/51] is a single global entry shared by all
+ * CPUs/processes (last writer wins). If the handler sat at a process-private
+ * PIE/ASLR user address, another process triggering the gate under its own CR3
+ * would jump to an address that is invalid in its address space -> ring-0 fault
+ * -> hard machine hang. A kernel-mapped address is valid across every CR3
+ * (esp. with pti=off). Both gates are stateless (args in registers, no
+ * rip-relative data refs), so whichever process's copy the IDT points at runs
+ * correctly for all of them.
+ */
+    .section isr_section,"awx",@progbits
+    .align 0x1000
+    .global __wrmsr_gate
+__wrmsr_gate:
+    mov %edi, %ecx
+    mov %esi, %eax
+    shr $32, %rsi
+    mov %esi, %edx
+    wrmsr
+    iretq
 
     .global __rdmsr_gate
 __rdmsr_gate:
